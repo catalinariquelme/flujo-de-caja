@@ -146,7 +146,7 @@ def build_parametros(wb):
             ("Dividendo / arriendo",             274_000,  CLP),
         ]),
         ("INVERSIÓN Y EVALUACIÓN", [
-            ("Inversión inicial  (amoblado)",    3_200_000, CLP),
+            ("Inversión inicial  (amoblado)",    3_500_000, CLP),
             ("Tasa de descuento anual",          0.12,      PCT),
         ]),
     ]
@@ -367,8 +367,8 @@ def build_flujo(wb):
                 cell.value = f"={p('servicios')}"
             elif row_num == 13: # Fondo
                 cell.value = f"={p('fondo')}"
-            elif row_num == 14: # Dividendo
-                cell.value = f"={p('dividendo')}"
+            elif row_num == 14: # Dividendo (0 durante gracia)
+                cell.value = f"=IF({m}<={p('gracia')},0,{p('dividendo')})"
             elif row_num == 15: # Total egresos
                 cell.value = f"=SUM({col}11:{col}14)"
             elif row_num == 17: # Flujo neto
