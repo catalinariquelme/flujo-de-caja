@@ -1,513 +1,563 @@
 """
 Genera un Excel de Flujo de Caja para un Airbnb.
+
+Layout Flujo de Caja: MESES = COLUMNAS | CONCEPTOS = FILAS
 Hojas: Parámetros | Flujo de Caja Mensual | Resumen
 """
 
 import openpyxl
-from openpyxl.styles import (
-    Font, PatternFill, Alignment, Border, Side, numbers
-)
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.chart import LineChart, Reference
-from openpyxl.chart.series import SeriesLabel
+import datetime
+
+# ── Constantes ────────────────────────────────────────────────────────────────
+HORIZONTE     = 36
+MESES_GRACIA  = 6   # solo para colorear; la lógica usa la celda de Parámetros
+
+C_DARK    = "1A1A2E"
+C_ACCENT  = "C0392B"   # rojo oscuro (gracia)
+C_BLUE    = "154360"
+C_INDIGO  = "1A237E"
+C_WHITE   = "FFFFFF"
+C_GRAY    = "F4F6F7"
+C_YELLOW  = "FFFDE7"
+C_GREEN_L = "D5F5E3"
+C_RED_L   = "FADBD8"
+C_BLUE_L  = "D6EAF8"
+
+CLP  = '#,##0'
+PCT  = '0.0%'
+PCT3 = '0.000%'
 
 
-# ── Colores ──────────────────────────────────────────────────────────────────
-C_DARK   = "1A1A2E"   # fondo encabezado
-C_ACCENT = "E94560"   # acento rojo-rosa
-C_LIGHT  = "16213E"   # fondo filas alternas oscuro
-C_BLUE   = "0F3460"   # azul medio
-C_WHITE  = "FFFFFF"
-C_GRAY   = "F2F2F2"
-C_GREEN  = "2ECC71"
-C_RED    = "E74C3C"
-C_YELLOW = "F39C12"
-
+# ── Helpers de estilo ─────────────────────────────────────────────────────────
 def fill(hex_color):
     return PatternFill("solid", fgColor=hex_color)
 
-def font(bold=False, color=C_WHITE, size=11, italic=False):
-    return Font(bold=bold, color=color, size=size, italic=italic,
-                name="Calibri")
+
+def fnt(bold=False, color=C_DARK, size=10, italic=False):
+    return Font(bold=bold, color=color, size=size, italic=italic, name="Calibri")
+
 
 def border_thin():
     s = Side(style="thin", color="CCCCCC")
     return Border(left=s, right=s, top=s, bottom=s)
 
-def align(h="center", v="center", wrap=False):
+
+def aln(h="center", v="center", wrap=False):
     return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def set_col_width(ws, col_letter, width):
-    ws.column_dimensions[col_letter].width = width
-
-def style_header_cell(cell, bg=C_DARK, fg=C_WHITE, size=11, bold=True):
-    cell.fill = fill(bg)
-    cell.font = font(bold=bold, color=fg, size=size)
-    cell.alignment = align()
-    cell.border = border_thin()
-
-def style_data_cell(cell, bg=C_WHITE, fg="1A1A2E", bold=False,
-                    h_align="right", num_fmt=None):
-    cell.fill = fill(bg)
-    cell.font = font(bold=bold, color=fg, size=10)
-    cell.alignment = align(h=h_align)
+def style_cell(cell, bg=C_WHITE, fg=C_DARK, bold=False, size=10,
+               h="right", wrap=False, num_fmt=None, italic=False):
+    cell.fill  = fill(bg)
+    cell.font  = fnt(bold=bold, color=fg, size=size, italic=italic)
+    cell.alignment = aln(h=h, wrap=wrap)
     cell.border = border_thin()
     if num_fmt:
         cell.number_format = num_fmt
 
 
-CLP = '#,##0'
-PCT = '0.0%'
+# ── Referencias a Parámetros ──────────────────────────────────────────────────
+# Filas reales en hoja Parámetros (se calculan en build_parametros)
+P_ROW = {
+    "horizonte":  4,
+    "gracia":     5,
+    "adr":        6,
+    "noches":     7,
+    "crec_adr":   8,
+    "comision":  11,
+    "g_comunes": 12,
+    "servicios": 13,
+    "fondo":     14,
+    "dividendo": 15,
+    "inversion": 18,
+    "tasa":      19,
+}
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# HOJA 1: PARÁMETROS
-# ═══════════════════════════════════════════════════════════════════════════════
+
+def p(key):
+    """Referencia absoluta a celda de Parámetros."""
+    return f"'Parámetros'!$B${P_ROW[key]}"
+
+
+# ── Columnas del Flujo de Caja ────────────────────────────────────────────────
+# Mes m (1-indexed) → columna B en adelante
+def mc(m):
+    """Column letter for month m."""
+    return get_column_letter(m + 1)      # m=1→B, m=36→AK
+
+
+FIRST_COL   = mc(1)                      # "B"
+LAST_COL    = mc(HORIZONTE)              # "AK"
+TOTAL_COL   = get_column_letter(HORIZONTE + 2)   # "AL"
+FC_SHEET    = "'Flujo de Caja Mensual'"
+
+# Filas de la hoja FC
+FC = {
+    "adr":          5,
+    "noches":       6,
+    "ing_brutos":   7,
+    "comision":     8,
+    "ing_netos":    9,
+    "g_comunes":   11,
+    "servicios":   12,
+    "fondo":       13,
+    "dividendo":   14,
+    "tot_egresos": 15,
+    "flujo_neto":  17,
+    "flujo_acum":  18,
+}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# HOJA 1 – PARÁMETROS
+# ═════════════════════════════════════════════════════════════════════════════
 def build_parametros(wb):
     ws = wb.create_sheet("Parámetros")
     ws.sheet_view.showGridLines = False
-    ws.row_dimensions[1].height = 40
-    ws.row_dimensions[2].height = 20
 
-    # anchos
-    for col, w in [("A", 34), ("B", 22), ("C", 18), ("D", 2)]:
-        set_col_width(ws, col, w)
+    ws.column_dimensions["A"].width = 36
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 4
+    ws.row_dimensions[1].height = 42
 
-    # título
-    ws.merge_cells("A1:C1")
+    # Título
+    ws.merge_cells("A1:B1")
     c = ws["A1"]
-    c.value = "PARÁMETROS – FLUJO DE CAJA AIRBNB"
-    c.fill = fill(C_DARK)
-    c.font = font(bold=True, size=15)
-    c.alignment = align()
+    c.value = "PARÁMETROS  –  FLUJO DE CAJA AIRBNB"
+    c.fill  = fill(C_DARK)
+    c.font  = fnt(bold=True, color=C_WHITE, size=14)
+    c.alignment = aln()
 
     secciones = [
         ("HORIZONTE Y OPERACIÓN", [
-            ("Horizonte (meses)",               36,       None),
-            ("Meses de gracia (sin ingresos)",  6,        None),
-            ("ADR promedio (CLP / noche)",       38_000,   CLP),
-            ("Noches promedio por mes",          21,       None),
-            ("Crecimiento anual ADR (%)",        0.03,     PCT),
+            ("Horizonte (meses)",               36,        None),
+            ("Meses de gracia (sin ingresos)",  6,         None),
+            ("ADR promedio (CLP / noche)",       38_000,    CLP),
+            ("Noches promedio por mes",          21,        None),
+            ("Crecimiento anual ADR",            0.03,      PCT),
         ]),
-        ("COSTOS OPERATIVOS (CLP/mes)", [
-            ("Comisión administración/Airbnb",  0.18,     PCT),
-            ("Gastos comunes",                  90_000,   CLP),
-            ("Servicios (luz, agua, internet)", 60_000,   CLP),
-            ("Fondo de mantención",             40_000,   CLP),
-            ("Dividendo / arriendo",            274_000,  CLP),
+        ("COSTOS OPERATIVOS (CLP / mes)", [
+            ("Comisión administración / Airbnb", 0.18,     PCT),
+            ("Gastos comunes",                   90_000,   CLP),
+            ("Servicios  (luz, agua, internet)", 60_000,   CLP),
+            ("Fondo de mantención",              40_000,   CLP),
+            ("Dividendo / arriendo",             274_000,  CLP),
         ]),
-        ("INVERSIÓN Y FINANCIAMIENTO", [
-            ("Inversión inicial (amoblado)",    3_200_000, CLP),
-            ("Tasa de descuento anual (%)",     0.12,      PCT),
+        ("INVERSIÓN Y EVALUACIÓN", [
+            ("Inversión inicial  (amoblado)",    3_200_000, CLP),
+            ("Tasa de descuento anual",          0.12,      PCT),
         ]),
     ]
 
-    named_ranges = {}   # label -> cell address for cross-sheet references
     row = 3
     for titulo, items in secciones:
-        # encabezado de sección
-        ws.merge_cells(f"A{row}:C{row}")
+        ws.row_dimensions[row].height = 22
+        ws.merge_cells(f"A{row}:B{row}")
         c = ws[f"A{row}"]
         c.value = titulo
-        c.fill = fill(C_BLUE)
-        c.font = font(bold=True, size=10)
-        c.alignment = align(h="left")
-        ws[f"B{row}"].fill = fill(C_BLUE)
-        ws[f"C{row}"].fill = fill(C_BLUE)
+        c.fill  = fill(C_BLUE)
+        c.font  = fnt(bold=True, color=C_WHITE, size=10)
+        c.alignment = aln(h="left")
         row += 1
 
         for label, valor, fmt in items:
+            ws.row_dimensions[row].height = 20
             bg = C_GRAY if row % 2 == 0 else C_WHITE
-            # etiqueta
+
             cA = ws[f"A{row}"]
             cA.value = label
-            style_data_cell(cA, bg=bg, h_align="left", fg="1A1A2E")
-            # valor
+            style_cell(cA, bg=bg, h="left")
+
             cB = ws[f"B{row}"]
             cB.value = valor
-            style_data_cell(cB, bg=bg, num_fmt=fmt, h_align="right")
-            cB.fill = fill("FFFDE7")   # amarillo suave → editable
-            cB.font = font(bold=True, color=C_BLUE, size=10)
-            # unidad
-            cC = ws[f"C{row}"]
-            cC.fill = fill(bg)
-            cC.border = border_thin()
-            named_ranges[label] = f"'Parámetros'!$B${row}"
+            cB.fill  = fill(C_YELLOW)
+            cB.font  = fnt(bold=True, color=C_BLUE, size=11)
+            cB.alignment = aln(h="right")
+            cB.border = border_thin()
+            if fmt:
+                cB.number_format = fmt
             row += 1
+
         row += 1   # espacio entre secciones
 
-    # leyenda
-    row += 1
-    ws.merge_cells(f"A{row}:C{row}")
+    # Leyenda
+    ws.row_dimensions[row].height = 28
+    ws.merge_cells(f"A{row}:B{row}")
     c = ws[f"A{row}"]
-    c.value = "Las celdas en amarillo son editables. Todos los demás valores se calculan automáticamente."
-    c.font = font(italic=True, color="888888", size=9)
-    c.alignment = align(h="left")
-
-    return named_ranges
+    c.value = "Las celdas en amarillo son editables – el resto se recalcula automáticamente."
+    c.font  = fnt(italic=True, color="888888", size=9)
+    c.alignment = aln(h="left", wrap=True)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# HOJA 2: FLUJO DE CAJA MENSUAL
-# ═══════════════════════════════════════════════════════════════════════════════
-def build_flujo(wb, params_addr):
+# ═════════════════════════════════════════════════════════════════════════════
+# HOJA 2 – FLUJO DE CAJA MENSUAL  (meses = columnas)
+# ═════════════════════════════════════════════════════════════════════════════
+def build_flujo(wb):
     ws = wb.create_sheet("Flujo de Caja Mensual")
     ws.sheet_view.showGridLines = False
 
-    # referencias a Parámetros (por índice de fila en params_addr)
-    def ref(label):
-        return params_addr[label]
+    # ── Anchos ──
+    ws.column_dimensions["A"].width = 32
+    for m in range(1, HORIZONTE + 1):
+        ws.column_dimensions[mc(m)].width = 11
+    ws.column_dimensions[TOTAL_COL].width = 15
 
-    # ── anchos de columna ──
-    headers = [
-        "Mes", "Período", "ADR\n(CLP/noche)", "Noches\npromedio",
-        "Ing. Brutos\n(CLP)", "Comisión\nAdmin/Airbnb",
-        "Ing. Netos\n(CLP)", "Gastos\nComunes",
-        "Servicios", "Fondo\nMantención",
-        "Dividendo", "Total\nEgresos",
-        "Flujo Neto\n(CLP)", "Flujo\nAcumulado\n(CLP)"
-    ]
-    col_widths = [7, 14, 14, 11, 16, 16, 14, 13, 13, 14, 13, 13, 14, 16]
-    for i, (_, w) in enumerate(zip(headers, col_widths), 1):
-        set_col_width(ws, get_column_letter(i), w)
-
-    # ── título ──
-    ws.merge_cells(f"A1:{get_column_letter(len(headers))}1")
+    # ── Fila 1: Título ──
+    last_col = TOTAL_COL
+    ws.merge_cells(f"A1:{last_col}1")
     c = ws["A1"]
-    c.value = "FLUJO DE CAJA MENSUAL – AIRBNB"
-    c.fill = fill(C_DARK)
-    c.font = font(bold=True, size=14)
-    c.alignment = align()
-    ws.row_dimensions[1].height = 35
+    c.value = "FLUJO DE CAJA MENSUAL  –  AIRBNB"
+    c.fill  = fill(C_DARK)
+    c.font  = fnt(bold=True, color=C_WHITE, size=14)
+    c.alignment = aln()
+    ws.row_dimensions[1].height = 38
 
-    # ── encabezados de columna ──
-    ws.row_dimensions[2].height = 42
-    for col_i, h in enumerate(headers, 1):
-        c = ws.cell(row=2, column=col_i, value=h)
-        c.fill = fill(C_ACCENT)
-        c.font = font(bold=True, size=9)
-        c.alignment = align(wrap=True)
-        c.border = border_thin()
+    # ── Fila 2: "Mes N" / "TOTAL" ──
+    ws.row_dimensions[2].height = 28
+    c = ws["A2"]
+    c.value = "Concepto"
+    c.fill  = fill(C_DARK)
+    c.font  = fnt(bold=True, color=C_WHITE, size=10)
+    c.alignment = aln(h="left")
+    c.border = border_thin()
 
-    # ── referencia corta a celdas de Parámetros ──
-    # Row numbers in Parámetros sheet (1-indexed, cuenta desde fila 3):
-    # Horizonte     -> row 4
-    # Meses gracia  -> row 5
-    # ADR           -> row 6
-    # Noches        -> row 7
-    # Crec ADR      -> row 8
-    # [sep row 9]
-    # Comisión      -> row 11
-    # Gastos com    -> row 12
-    # Servicios     -> row 13
-    # Fondo mant    -> row 14
-    # Dividendo     -> row 15
-    # [sep row 16]
-    # Inversión     -> row 18
-    # Tasa desc     -> row 19
-
-    P = "Parámetros"   # shorthand
-
-    horizonte = 36
-    meses_gracia = 6
-
-    inv_row = 3   # row offset counter used during build_parametros
-    # We hard-code row numbers matching build_parametros logic:
-    ROW = {
-        "horizonte":    4,
-        "gracia":       5,
-        "adr":          6,
-        "noches":       7,
-        "crec_adr":     8,
-        "comision":    11,
-        "g_comunes":   12,
-        "servicios":   13,
-        "fondo":       14,
-        "dividendo":   15,
-        "inversion":   18,
-        "tasa":        19,
-    }
-
-    def p(key):
-        return f"'{P}'!$B${ROW[key]}"
-
-    # ── datos mes a mes ──
-    data_start = 3
-    import datetime
     start_date = datetime.date(2025, 1, 1)
 
-    for mes in range(1, horizonte + 1):
-        row = data_start + mes - 1
-        ws.row_dimensions[row].height = 18
-        bg = "EEF2FF" if mes % 2 == 0 else C_WHITE
-        en_gracia = mes <= meses_gracia
+    for m in range(1, HORIZONTE + 1):
+        col = mc(m)
+        in_grace = m <= MESES_GRACIA
+        hdr_bg   = C_ACCENT if in_grace else C_BLUE
 
-        fecha = start_date.replace(
-            month=((start_date.month + mes - 2) % 12) + 1,
-            year=start_date.year + (start_date.month + mes - 2) // 12
-        )
-        periodo = fecha.strftime("%b %Y")
+        c2 = ws[f"{col}2"]
+        c2.value = f"Mes {m}"
+        c2.fill  = fill(hdr_bg)
+        c2.font  = fnt(bold=True, color=C_WHITE, size=9)
+        c2.alignment = aln()
+        c2.border = border_thin()
 
-        # Col A: Mes
-        c = ws.cell(row=row, column=1, value=mes)
-        style_data_cell(c, bg=bg, h_align="center")
+    # Total col header
+    ct = ws[f"{TOTAL_COL}2"]
+    ct.value = "TOTAL / FINAL"
+    ct.fill  = fill(C_INDIGO)
+    ct.font  = fnt(bold=True, color=C_WHITE, size=9)
+    ct.alignment = aln()
+    ct.border = border_thin()
 
-        # Col B: Período
-        c = ws.cell(row=row, column=2, value=periodo)
-        style_data_cell(c, bg=bg, h_align="center")
+    # ── Fila 3: período (Ene 2025 …) ──
+    ws.row_dimensions[3].height = 20
+    c = ws["A3"]
+    c.value = "Período"
+    c.fill  = fill("2C3E50")
+    c.font  = fnt(bold=True, color=C_WHITE, size=9)
+    c.alignment = aln(h="left")
+    c.border = border_thin()
 
-        # Col C: ADR con crecimiento anual compuesto
-        # ADR_mes = ADR_base * (1+g)^floor((mes-1)/12)
-        año_idx = (mes - 1) // 12
-        adr_formula = f"={p('adr')}*(1+{p('crec_adr')})^{año_idx}"
-        c = ws.cell(row=row, column=3, value=adr_formula if not en_gracia else 0)
-        style_data_cell(c, bg="FFE0E0" if en_gracia else bg, num_fmt=CLP)
+    for m in range(1, HORIZONTE + 1):
+        month_num = ((start_date.month + m - 2) % 12) + 1
+        year_num  = start_date.year + (start_date.month + m - 2) // 12
+        period    = datetime.date(year_num, month_num, 1).strftime("%b %Y")
+        c3 = ws[f"{mc(m)}3"]
+        c3.value = period
+        c3.fill  = fill("2C3E50")
+        c3.font  = fnt(color=C_WHITE, size=8)
+        c3.alignment = aln()
+        c3.border = border_thin()
 
-        # Col D: Noches (0 en gracia)
-        noches_val = f"=IF({mes}<={p('gracia')},0,{p('noches')})"
-        c = ws.cell(row=row, column=4, value=noches_val)
-        style_data_cell(c, bg="FFE0E0" if en_gracia else bg, h_align="center",
-                        num_fmt="0")
+    ct3 = ws[f"{TOTAL_COL}3"]
+    ct3.value = "36 meses"
+    ct3.fill  = fill("2C3E50")
+    ct3.font  = fnt(color=C_WHITE, size=8)
+    ct3.alignment = aln()
+    ct3.border = border_thin()
 
-        # Col E: Ingresos brutos = ADR * noches
-        c_adr = get_column_letter(3)
-        c_noch = get_column_letter(4)
-        ing_brutos = f"={c_adr}{row}*{c_noch}{row}"
-        c = ws.cell(row=row, column=5, value=ing_brutos)
-        style_data_cell(c, bg="FFE0E0" if en_gracia else bg, num_fmt=CLP)
+    # ── Secciones (filas sin datos) ──
+    section_rows = {
+        4:  ("INGRESOS",               C_BLUE),
+        10: ("EGRESOS FIJOS",          "7B241C"),
+        16: ("RESULTADO",              "1A5276"),
+    }
 
-        # Col F: Comisión
-        comision_f = f"=E{row}*{p('comision')}"
-        c = ws.cell(row=row, column=6, value=comision_f)
-        style_data_cell(c, bg="FFE0E0" if en_gracia else bg, num_fmt=CLP)
+    # ── Filas de datos ──
+    # (fila, label, es_total/bold, formato)
+    data_rows = [
+        (5,  "ADR  (CLP / noche)",              False, CLP),
+        (6,  "Noches del mes",                   False, "0"),
+        (7,  "Ingresos Brutos  (CLP)",           False, CLP),
+        (8,  "( - ) Comisión admin / Airbnb",    False, CLP),
+        (9,  "INGRESOS NETOS  (CLP)",            True,  CLP),
+        (11, "Gastos Comunes",                    False, CLP),
+        (12, "Servicios  (luz, agua, internet)", False, CLP),
+        (13, "Fondo de Mantención",              False, CLP),
+        (14, "Dividendo / Arriendo",             False, CLP),
+        (15, "TOTAL EGRESOS",                    True,  CLP),
+        (17, "FLUJO NETO MENSUAL  (CLP)",        True,  CLP),
+        (18, "FLUJO ACUMULADO  (CLP)",           True,  CLP),
+    ]
 
-        # Col G: Ingresos netos
-        ing_netos = f"=E{row}-F{row}"
-        c = ws.cell(row=row, column=7, value=ing_netos)
-        c.fill = fill("D5F5E3" if not en_gracia else "FFE0E0")
-        c.font = font(bold=True, color="1A6B3A" if not en_gracia else "B71C1C",
-                      size=10)
-        c.alignment = align(h="right")
-        c.border = border_thin()
-        c.number_format = CLP
+    # Render secciones
+    for row_num, (titulo, color) in section_rows.items():
+        ws.row_dimensions[row_num].height = 22
+        ws.merge_cells(f"A{row_num}:{TOTAL_COL}{row_num}")
+        c = ws[f"A{row_num}"]
+        c.value = titulo
+        c.fill  = fill(color)
+        c.font  = fnt(bold=True, color=C_WHITE, size=10)
+        c.alignment = aln(h="left")
 
-        # Col H: Gastos comunes
-        c = ws.cell(row=row, column=8, value=f"={p('g_comunes')}")
-        style_data_cell(c, bg=bg, num_fmt=CLP)
+    # Render filas de datos
+    INCOME_ROWS  = {5, 6, 7, 8, 9}
+    RESULT_ROWS  = {9, 15, 17, 18}
 
-        # Col I: Servicios
-        c = ws.cell(row=row, column=9, value=f"={p('servicios')}")
-        style_data_cell(c, bg=bg, num_fmt=CLP)
+    for row_num, label, is_bold, num_fmt in data_rows:
+        ws.row_dimensions[row_num].height = 20
 
-        # Col J: Fondo mantención
-        c = ws.cell(row=row, column=10, value=f"={p('fondo')}")
-        style_data_cell(c, bg=bg, num_fmt=CLP)
+        # Etiqueta (col A)
+        cA = ws[f"A{row_num}"]
+        cA.value = label
+        lbl_bg = C_BLUE_L if is_bold else C_WHITE
+        style_cell(cA, bg=lbl_bg, bold=is_bold, h="left", num_fmt=None)
 
-        # Col K: Dividendo
-        c = ws.cell(row=row, column=11, value=f"={p('dividendo')}")
-        style_data_cell(c, bg=bg, num_fmt=CLP)
+        # Columnas de meses
+        for m in range(1, HORIZONTE + 1):
+            col = mc(m)
+            cell = ws[f"{col}{row_num}"]
+            in_grace = m <= MESES_GRACIA
 
-        # Col L: Total egresos
-        c = ws.cell(row=row, column=12, value=f"=SUM(H{row}:K{row})")
-        style_data_cell(c, bg=bg, bold=True, num_fmt=CLP)
+            # Color de fondo
+            if in_grace and row_num in INCOME_ROWS:
+                bg = C_RED_L
+            elif row_num in RESULT_ROWS:
+                bg = C_GREEN_L if not in_grace else C_RED_L
+            elif row_num % 2 == 0:
+                bg = C_GRAY
+            else:
+                bg = C_WHITE
 
-        # Col M: Flujo neto
-        flujo_neto = f"=G{row}-L{row}"
-        c = ws.cell(row=row, column=13, value=flujo_neto)
-        # conditional color via value (static at generation time, formula stays)
-        c.fill = fill(bg)
-        c.font = font(bold=True, color="1A6B3A" if not en_gracia else "B71C1C",
-                      size=10)
-        c.alignment = align(h="right")
-        c.border = border_thin()
-        c.number_format = CLP
+            # Color de fuente
+            if row_num == 18:
+                fg = "1A5276"
+            elif row_num == 17:
+                fg = "145A32" if not in_grace else "7B241C"
+            elif row_num == 9:
+                fg = "145A32" if not in_grace else "7B241C"
+            else:
+                fg = C_DARK
 
-        # Col N: Flujo acumulado
-        if mes == 1:
-            flujo_acum = f"=-{p('inversion')}+M{row}"
-        else:
-            flujo_acum = f"=N{row-1}+M{row}"
-        c = ws.cell(row=row, column=14, value=flujo_acum)
-        c.fill = fill(bg)
-        c.font = font(bold=True, color="333333", size=10)
-        c.alignment = align(h="right")
-        c.border = border_thin()
-        c.number_format = CLP
+            style_cell(cell, bg=bg, fg=fg, bold=is_bold, size=9, num_fmt=num_fmt)
 
-    # ── fila de totales ──
-    tot_row = data_start + horizonte
-    ws.row_dimensions[tot_row].height = 22
-    ws.merge_cells(f"A{tot_row}:F{tot_row}")
-    c = ws[f"A{tot_row}"]
-    c.value = "TOTALES"
-    c.fill = fill(C_DARK)
-    c.font = font(bold=True, size=11)
-    c.alignment = align()
+            # Formulas
+            year_idx = (m - 1) // 12
 
-    for col in range(7, 15):
-        col_l = get_column_letter(col)
-        c = ws.cell(row=tot_row, column=col,
-                    value=f"=SUM({col_l}{data_start}:{col_l}{data_start+horizonte-1})"
-                          if col != 14 else
-                          f"={get_column_letter(14)}{data_start+horizonte-1}")
-        c.fill = fill(C_DARK)
-        c.font = font(bold=True, size=10)
-        c.alignment = align(h="right")
-        c.border = border_thin()
-        c.number_format = CLP
+            if row_num == 5:    # ADR con crecimiento
+                cell.value = (f"=IF({m}<={p('gracia')},0,"
+                              f"{p('adr')}*(1+{p('crec_adr')})^{year_idx})")
+            elif row_num == 6:  # Noches
+                cell.value = f"=IF({m}<={p('gracia')},0,{p('noches')})"
+            elif row_num == 7:  # Ingresos brutos
+                cell.value = f"={col}5*{col}6"
+            elif row_num == 8:  # Comisión
+                cell.value = f"={col}7*{p('comision')}"
+            elif row_num == 9:  # Ingresos netos
+                cell.value = f"={col}7-{col}8"
+            elif row_num == 11: # Gastos comunes
+                cell.value = f"={p('g_comunes')}"
+            elif row_num == 12: # Servicios
+                cell.value = f"={p('servicios')}"
+            elif row_num == 13: # Fondo
+                cell.value = f"={p('fondo')}"
+            elif row_num == 14: # Dividendo
+                cell.value = f"={p('dividendo')}"
+            elif row_num == 15: # Total egresos
+                cell.value = f"=SUM({col}11:{col}14)"
+            elif row_num == 17: # Flujo neto
+                cell.value = f"={col}9-{col}15"
+            elif row_num == 18: # Flujo acumulado
+                if m == 1:
+                    cell.value = f"=-{p('inversion')}+{col}17"
+                else:
+                    cell.value = f"={mc(m-1)}18+{col}17"
 
-    # ── Inmovilizar panel ──
-    ws.freeze_panes = "C3"
+        # Columna TOTAL
+        tc = ws[f"{TOTAL_COL}{row_num}"]
+        style_cell(tc, bg=C_BLUE_L, bold=True, num_fmt=num_fmt)
+        if row_num == 5:           # ADR promedio
+            tc.value = f"=AVERAGE({FIRST_COL}5:{LAST_COL}5)"
+        elif row_num == 18:        # Acumulado: último valor
+            tc.value = f"={LAST_COL}18"
+        else:                      # Suma de todos los meses
+            tc.value = f"=SUM({FIRST_COL}{row_num}:{LAST_COL}{row_num})"
 
-    return ws, data_start, horizonte, ROW, P
+    # Inmovilizar: columna A + filas 1-3
+    ws.freeze_panes = "B4"
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# HOJA 3: RESUMEN / KPIs
-# ═══════════════════════════════════════════════════════════════════════════════
-def build_resumen(wb, data_start, horizonte, ROW, P):
+# ═════════════════════════════════════════════════════════════════════════════
+# HOJA 3 – RESUMEN EJECUTIVO
+# ═════════════════════════════════════════════════════════════════════════════
+def build_resumen(wb):
     ws = wb.create_sheet("Resumen")
     ws.sheet_view.showGridLines = False
 
-    set_col_width(ws, "A", 36)
-    set_col_width(ws, "B", 22)
-    set_col_width(ws, "C", 18)
+    ws.column_dimensions["A"].width = 38
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 4
 
-    # título
-    ws.merge_cells("A1:C1")
+    # Título
+    ws.merge_cells("A1:B1")
     c = ws["A1"]
-    c.value = "RESUMEN EJECUTIVO – FLUJO DE CAJA AIRBNB"
-    c.fill = fill(C_DARK)
-    c.font = font(bold=True, size=14)
-    c.alignment = align()
-    ws.row_dimensions[1].height = 38
+    c.value = "RESUMEN EJECUTIVO  –  FLUJO DE CAJA AIRBNB"
+    c.fill  = fill(C_DARK)
+    c.font  = fnt(bold=True, color=C_WHITE, size=14)
+    c.alignment = aln()
+    ws.row_dimensions[1].height = 40
 
-    def p(key):
-        return f"'{P}'!$B${ROW[key]}"
+    tasa_mensual = f"(1+{p('tasa')})^(1/12)-1"
 
-    fc_sheet = "'Flujo de Caja Mensual'"
-    last_row = data_start + horizonte - 1
-    first_data = data_start
+    # ── Rangos del FC ──
+    fn_range   = f"{FC_SHEET}!{FIRST_COL}17:{LAST_COL}17"  # Flujo neto 36 meses
+    acum_final = f"{FC_SHEET}!{LAST_COL}18"                 # Último acumulado
 
-    # Referencia a col N (flujo acumulado) de la hoja FC
-    def fc_col(col_letter, row):
-        return f"={fc_sheet}!{col_letter}{row}"
+    # IRR helper: fila 50 col A (t=0) + cols B..AK (t=1..36)
+    irr_range  = f"A50:{get_column_letter(HORIZONTE + 1)}50"   # A50:AK50
 
     kpis = [
-        ("INVERSIÓN", [
-            ("Inversión inicial (amoblado)", f"={p('inversion')}", CLP),
-            ("Horizonte de análisis",        f"={p('horizonte')}&\" meses\"", "@"),
-            ("Meses de gracia",              f"={p('gracia')}", "0"),
+        ("PARÁMETROS CLAVE", [
+            ("Inversión inicial (amoblado)",          f"={p('inversion')}",   CLP),
+            ("Horizonte de análisis",                 f"={p('horizonte')}",   "0\" meses\""),
+            ("Meses de gracia (sin ingresos)",        f"={p('gracia')}",      "0"),
+            ("ADR inicial (CLP / noche)",             f"={p('adr')}",         CLP),
+            ("Noches promedio / mes",                 f"={p('noches')}",      "0"),
+            ("Crecimiento anual ADR",                 f"={p('crec_adr')}",    PCT),
+            ("Comisión admin / Airbnb",               f"={p('comision')}",    PCT),
         ]),
-        ("INGRESOS ESPERADOS", [
-            ("ADR promedio inicial (CLP/noche)", f"={p('adr')}", CLP),
-            ("Noches promedio / mes",            f"={p('noches')}", "0"),
-            ("Ingreso bruto mensual promedio",
+        ("INGRESOS ESPERADOS (mensual, sin gracia)", [
+            ("Ingreso bruto mensual",
              f"={p('adr')}*{p('noches')}", CLP),
-            ("Comisión administración/Airbnb",   f"={p('comision')}", PCT),
-            ("Ingreso neto mensual promedio",
+            ("Comisión mensual",
+             f"={p('adr')}*{p('noches')}*{p('comision')}", CLP),
+            ("Ingreso neto mensual",
              f"={p('adr')}*{p('noches')}*(1-{p('comision')})", CLP),
         ]),
         ("EGRESOS FIJOS MENSUALES", [
-            ("Gastos comunes",      f"={p('g_comunes')}", CLP),
-            ("Servicios",           f"={p('servicios')}", CLP),
-            ("Fondo mantención",    f"={p('fondo')}",     CLP),
-            ("Dividendo / arriendo",f"={p('dividendo')}",  CLP),
-            ("Total egresos fijos",
+            ("Gastos comunes",                f"={p('g_comunes')}",  CLP),
+            ("Servicios (luz, agua, internet)",f"={p('servicios')}", CLP),
+            ("Fondo de mantención",           f"={p('fondo')}",      CLP),
+            ("Dividendo / arriendo",          f"={p('dividendo')}",   CLP),
+            ("Total egresos fijos / mes",
              f"={p('g_comunes')}+{p('servicios')}+{p('fondo')}+{p('dividendo')}",
              CLP),
+            ("Margen neto mensual esperado",
+             f"={p('adr')}*{p('noches')}*(1-{p('comision')})"
+             f"-({p('g_comunes')}+{p('servicios')}+{p('fondo')}+{p('dividendo')})",
+             CLP),
+        ]),
+        ("TOTALES  (36 meses)", [
+            ("Ingresos netos totales",    f"={FC_SHEET}!{TOTAL_COL}9",  CLP),
+            ("Total egresos",             f"={FC_SHEET}!{TOTAL_COL}15", CLP),
+            ("Flujo neto total",          f"={FC_SHEET}!{TOTAL_COL}17", CLP),
+            ("Flujo acumulado final",     acum_final,                   CLP),
         ]),
         ("INDICADORES FINANCIEROS", [
-            ("Tasa de descuento anual",  f"={p('tasa')}", PCT),
-            ("Tasa de descuento mensual",
-             f"=(1+{p('tasa')})^(1/12)-1", "0.000%"),
-            ("Flujo neto total (36 meses)",
-             f"={fc_sheet}!M{last_row+1}", CLP),  # total row
-            ("Flujo acumulado final",
-             f"={fc_sheet}!N{last_row}", CLP),
-            # VAN: inversión en mes 0 + flujos descontados
-            ("VAN (Valor Actual Neto)",
-             f"=NPV((1+{p('tasa')})^(1/12)-1,"
-             f"{fc_sheet}!M{first_data}:{fc_sheet}!M{last_row})"
-             f"-{p('inversion')}",
-             CLP),
-            # TIR: incluye -inversión en mes 0
+            ("Tasa de descuento anual",   f"={p('tasa')}",         PCT),
+            ("Tasa de descuento mensual", f"={tasa_mensual}",       PCT3),
+            ("VAN  (Valor Actual Neto)",
+             f"=NPV({tasa_mensual},{fn_range})-{p('inversion')}",   CLP),
             ("TIR mensual",
-             f"=IFERROR(IRR(IF({{1}},{{-{p('inversion')},"
-             f"{fc_sheet}!M{first_data}:{fc_sheet}!M{last_row}}})),\"N/D\")",
-             "0.00%"),
-            ("Payback (mes aprox.)",
-             f"=IFERROR(MATCH(0,IF({fc_sheet}!N{first_data}:{fc_sheet}!N{last_row}>0,1,0),0)"
-             f"+{p('gracia')},\"No recuperado\")",
-             "0"),
+             f"=IFERROR(IRR({irr_range}),\"N/D\")",                 "0.00%"),
+            ("TIR anual equiv.",
+             f"=IFERROR((1+IRR({irr_range}))^12-1,\"N/D\")",        PCT),
+            ("Payback (meses aprox.)",
+             f"=IFERROR(IF(COUNTIF({FC_SHEET}!{FIRST_COL}18:{LAST_COL}18,\"<0\")={HORIZONTE},"
+             f"\"No recuperado en el horizonte\","
+             f"COUNTIF({FC_SHEET}!{FIRST_COL}18:{LAST_COL}18,\"<0\")&\" meses\"),\"N/D\")",
+             "@"),
         ]),
     ]
 
     row = 3
     for titulo, items in kpis:
-        ws.merge_cells(f"A{row}:C{row}")
+        ws.row_dimensions[row].height = 22
+        ws.merge_cells(f"A{row}:B{row}")
         c = ws[f"A{row}"]
         c.value = titulo
-        c.fill = fill(C_BLUE)
-        c.font = font(bold=True, size=10)
-        c.alignment = align(h="left")
-        ws[f"B{row}"].fill = fill(C_BLUE)
-        ws[f"C{row}"].fill = fill(C_BLUE)
+        c.fill  = fill(C_BLUE)
+        c.font  = fnt(bold=True, color=C_WHITE, size=10)
+        c.alignment = aln(h="left")
         row += 1
 
-        for label, formula, fmt in items:
+        for label, formula, num_fmt in items:
+            ws.row_dimensions[row].height = 20
             bg = C_GRAY if row % 2 == 0 else C_WHITE
+
             cA = ws[f"A{row}"]
             cA.value = label
-            style_data_cell(cA, bg=bg, h_align="left")
+            style_cell(cA, bg=bg, h="left")
 
             cB = ws[f"B{row}"]
-            # Algunos son fórmulas array, otros texto
-            if formula.startswith("="):
-                cB.value = formula
-            else:
-                cB.value = formula
-            cB.fill = fill(bg)
-            cB.font = font(bold=True, color=C_DARK, size=10)
-            cB.alignment = align(h="right")
+            cB.value = formula
+            cB.fill  = fill(bg)
+            cB.font  = fnt(bold=True, color=C_DARK, size=11)
+            cB.alignment = aln(h="right")
             cB.border = border_thin()
-            if fmt and fmt != "@":
-                cB.number_format = fmt
-
-            cC = ws[f"C{row}"]
-            cC.fill = fill(bg)
-            cC.border = border_thin()
+            if num_fmt and num_fmt != "@":
+                cB.number_format = num_fmt
             row += 1
-        row += 1
 
-    # Nota VAN
-    row += 1
-    ws.merge_cells(f"A{row}:C{row}")
-    c = ws[f"A{row}"]
-    c.value = ("Nota: VAN positivo indica que el proyecto genera valor por "
-               "encima de la tasa de descuento elegida (12% anual). "
-               "TIR se calcula con flujos mensuales incluyendo la inversión inicial en t=0.")
-    c.font = font(italic=True, color="888888", size=9)
-    c.alignment = align(h="left", wrap=True)
+        row += 1   # espacio entre secciones
+
+    # ── Fila 50: helper para IRR [-Inv, FN_1 .. FN_36] ──
+    # t=0 → col A; t=1..36 → cols B..AK
+    ws.row_dimensions[50].height = 14
+    lbl = ws["A50"]
+    lbl.value = "Helper TIR →"
+    lbl.font  = fnt(italic=True, color="AAAAAA", size=8)
+    lbl.alignment = aln(h="left")
+
+    ws["B50"].value = f"=-{p('inversion')}"          # t = 0
+    for m in range(1, HORIZONTE + 1):
+        col_helper = get_column_letter(m + 2)         # t=1→C, t=36→AL
+        fc_m_col   = mc(m)                            # FC sheet col for month m
+        ws[f"{col_helper}50"].value = f"={FC_SHEET}!{fc_m_col}17"
+
+    # Actualizar irr_range para incluir t=0 en col B y t=36 en col AL
+    # B50 = t=0 (-inv), C50..AL50 = t=1..t=36  → range B50:AL50 (37 celdas)
+    irr_range_real = f"B50:{get_column_letter(HORIZONTE + 2)}50"   # B50:AL50
+
+    # Corregir las fórmulas TIR que usan irr_range
+    # Buscar y actualizar las celdas de TIR en la hoja
+    for r in range(1, 50):
+        for col_idx in [2]:  # col B
+            cell = ws.cell(row=r, column=col_idx)
+            if cell.value and isinstance(cell.value, str) and irr_range in cell.value:
+                cell.value = cell.value.replace(irr_range, irr_range_real)
+
+    # Nota al pie
+    row += 2
     ws.row_dimensions[row].height = 36
+    ws.merge_cells(f"A{row}:B{row}")
+    c = ws[f"A{row}"]
+    c.value = ("Nota: VAN > 0 indica que el proyecto supera la rentabilidad mínima exigida. "
+               "TIR se calcula con la inversión inicial en t=0 y flujos netos mensuales t=1..36.")
+    c.font  = fnt(italic=True, color="888888", size=9)
+    c.alignment = aln(h="left", wrap=True)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
 # MAIN
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
 def main():
     wb = openpyxl.Workbook()
-    # Quitar hoja default
     wb.remove(wb.active)
 
-    params_addr = build_parametros(wb)
-    ws_fc, data_start, horizonte, ROW, P = build_flujo(wb, params_addr)
-    build_resumen(wb, data_start, horizonte, ROW, P)
+    build_parametros(wb)
+    build_flujo(wb)
+    build_resumen(wb)
 
     out = "/home/user/flujo-de-caja/airbnb/flujo_caja_airbnb.xlsx"
     wb.save(out)
-    print(f"Archivo generado: {out}")
+    print(f"Archivo guardado: {out}")
 
 
 if __name__ == "__main__":
